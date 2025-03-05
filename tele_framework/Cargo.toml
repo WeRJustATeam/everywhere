@@ -1,0 +1,15 @@
+[package]
+name = "tele_framework"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+paste = "1.0"
+tracing = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tracing-subscriber = "0.3"

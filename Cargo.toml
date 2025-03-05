@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "tele_framework",
+]
+
+# 工作空间依赖，所有成员crate共享
+[workspace.dependencies]
+tokio = { version = "1.28", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+uuid = { version = "1.3", features = ["v4", "serde"] }
+
+# 工作空间全局设置
+[workspace.package]
+authors = ["Your Name <your.email@example.com>"]
+edition = "2021"
+rust-version = "1.70" 

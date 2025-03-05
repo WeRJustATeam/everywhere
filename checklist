@@ -1,3 +1,10 @@
+测试：
 集成测试程序里面去启动进程并和进程交互, 不要用各种脚本
 测试启动子进程直接用cargo，不要使用终端软件，如cmd
 运行测试分析内容输出到文件，以免终端缓冲区不够
+
+开发范式：
+模块使用derive LogicalModule(tele_derive) 宏生成模块结构体，并实现对应的逻辑
+view用于模块间相互访问，使用logical_module_view! 构建对应的view结构体以及其函数
+module以及view都不该被debug，因为可能是一个很大的状态机；
+如果一个结构持有view/module引用，但是要实现debug，则需手动实现Debug trait
