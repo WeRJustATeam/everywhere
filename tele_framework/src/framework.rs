@@ -4,58 +4,65 @@ use paste::paste;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-type WSResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type WSResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
 
 #[async_trait]
 pub trait LogicalModule: Send + Sync {
     type View: Send + Sync;
+    type NewArg: Send + Sync;
     
     fn name(&self) -> &str;
-    async fn init(view: Self::View) -> WSResult<Self> where Self: Sized;
+    async fn init(view: Self::View, arg: Self::NewArg) -> WSResult<Self> where Self: Sized;
     async fn shutdown(&self) -> WSResult<()>;
 }
 
-pub struct Framework {
-    modules: Vec<u8>,
-}
 
 #[macro_export]
 macro_rules! define_module {
     ($module:ident $(, ($field:ident, $dep_type:ty))*) => {
         paste! {
-            // 定义该模块的View trait - 只包含需要访问的模块函数
-            pub trait [<$module ViewTrait>]: Send + Sync {
-                $(
-                    fn $field(&self) -> &$dep_type;
-                )*
-                fn initialized(&self) -> &::std::sync::Mutex<bool>;
-                fn shutdown(&self) -> &::std::sync::Mutex<bool>;
+            
+            // 定义模块的AccessTrait
+            #[async_trait::async_trait]
+            pub trait [<$module AccessTrait>]: Send + Sync {
+                fn [<$module:snake>](&self) -> &Arc<$module>;
             }
+
+            // 创建一个新trait，将所有依赖的AccessTrait作为supertrait
+            pub trait [<$module ViewTrait>]: Send + Sync $(+ [<$dep_type AccessTrait>])* {
+                // 这个trait可以为空，它的目的只是组合多个AccessTrait
+            }
+            
+            // 为所有实现了必要AccessTrait的类型自动实现ViewTrait
+            impl<T> [<$module ViewTrait>] for T 
+            where 
+                T: Send + Sync $(+ [<$dep_type AccessTrait>])* 
+            {}
 
             // 定义View结构体
             pub struct [<$module View>] {
-                framework: ::std::sync::Arc<dyn [<$module ViewTrait>]>
+                pub view: std::sync::Weak<dyn [<$module ViewTrait>]>
             }
 
             // View实现
             impl [<$module View>] {
-                pub fn new(framework: ::std::sync::Arc<dyn [<$module ViewTrait>]>) -> Self {
-                    Self { framework }
+                pub fn new(view: &Arc<dyn [<$module ViewTrait>]>) -> Self {
+                    Self { 
+                        view: Arc::downgrade(view)
+                    }
                 }
 
+                // 获取每个依赖模块
                 $(
-                    pub fn $field(&self) -> &$dep_type {
-                        self.framework.$field()
+                    pub fn [<$dep_type:snake>](&self) -> &$dep_type {
+                        // 直接访问，不需要安全检查，因为这是在框架内部使用
+                        unsafe {
+                            let ptr: *const dyn [<$module ViewTrait>] = std::mem::transmute(self.view.as_ptr());
+                            (*ptr).[<$dep_type:snake>]()
+                        }
                     }
                 )*
-
-                pub fn initialized(&self) -> &::std::sync::Mutex<bool> {
-                    self.framework.initialized()
-                }
-
-                pub fn shutdown(&self) -> &::std::sync::Mutex<bool> {
-                    self.framework.shutdown()
-                }
             }
         }
     };
@@ -65,104 +72,113 @@ macro_rules! define_module {
 macro_rules! define_framework {
     ($first:ident: $first_type:ty $(, $rest:ident: $rest_type:ty)*) => {
         paste! {
-            // 为每个字段定义大小常量
-            const [<$first:upper _SIZE>]: usize = ::std::mem::size_of::<$first_type>();
-            $(
-                const [<$rest:upper _SIZE>]: usize = ::std::mem::size_of::<$rest_type>();
-            )*
+            pub struct FrameworkInner {
+                pub modules: Vec<u8>,
+            }
 
-            // 为每个字段定义偏移常量
-            const [<$first:upper _OFFSET>]: usize = 0;
-            $(
-                const [<$rest:upper _OFFSET>]: usize = [<$first:upper _OFFSET>] + [<$first:upper _SIZE>];
-            )*
+            pub struct Framework(Arc<FrameworkInner>);
 
-            // Framework实现每个模块的ViewTrait
-            impl [<$first_type ViewTrait>] for Framework {
-                fn initialized(&self) -> &::std::sync::Mutex<bool> {
-                    unsafe {
-                        let ptr = self.modules.as_ptr() as *const $first_type;
-                        &(*ptr).initialized
-                    }
-                }
-                fn shutdown(&self) -> &::std::sync::Mutex<bool> {
-                    unsafe {
-                        let ptr = self.modules.as_ptr() as *const $first_type;
-                        &(*ptr).shutdown
-                    }
+            impl Framework {
+                pub fn new() -> Self {
+                    Self(Arc::new(FrameworkInner {
+                        modules: Vec::new(),
+                    }))
                 }
             }
 
+            // 为Framework实现各个模块的AccessTrait
+            #[async_trait::async_trait]
+            impl [<$first_type AccessTrait>] for FrameworkInner {
+                fn [<$first_type:snake>](&self) -> &Arc<$first_type> {
+                    // 使用unsafe获取第一个模块
+                    unsafe {
+                        // 将原来存储的字节转换为模块指针
+                        let ptr = self.modules.as_ptr() as *const $first_type;
+                        // 包装为Arc
+                        std::mem::transmute::<&$first_type, &Arc<$first_type>>(&*ptr)
+                    }
+                }
+            }
+            
             $(
-                impl [<$rest_type ViewTrait>] for Framework {
-                    fn $first(&self) -> &$first_type {
+                #[async_trait::async_trait]
+                impl [<$rest_type AccessTrait>] for FrameworkInner {
+                    fn [<$rest_type:snake>](&self) -> &Arc<$rest_type> {
+                        // 使用unsafe获取其他模块
                         unsafe {
-                            let ptr = self.modules.as_ptr() as *const $first_type;
-                            &*ptr
-                        }
-                    }
-                    fn a(&self) -> &$rest_type {
-                        unsafe {
-                            let ptr = (self.modules.as_ptr().add([<$rest:upper _OFFSET>])) as *const $rest_type;
-                            &*ptr
-                        }
-                    }
-                    fn initialized(&self) -> &::std::sync::Mutex<bool> {
-                        unsafe {
-                            let ptr = (self.modules.as_ptr().add([<$rest:upper _OFFSET>])) as *const $rest_type;
-                            &(*ptr).initialized
-                        }
-                    }
-                    fn shutdown(&self) -> &::std::sync::Mutex<bool> {
-                        unsafe {
-                            let ptr = (self.modules.as_ptr().add([<$rest:upper _OFFSET>])) as *const $rest_type;
-                            &(*ptr).shutdown
+                            // 计算偏移量
+                            let offset = ::std::mem::size_of::<$first_type>();
+                            // 将原来存储的字节转换为模块指针
+                            let ptr = (self.modules.as_ptr().add(offset)) as *const $rest_type;
+                            // 包装为Arc
+                            std::mem::transmute::<&$rest_type, &Arc<$rest_type>>(&*ptr)
                         }
                     }
                 }
             )*
-
-            impl Framework {
-                // 获取各个模块的 view
-                pub fn [<$first _view>](&self) -> [<$first_type View>] {
-                    let arc: ::std::sync::Arc<dyn [<$first_type ViewTrait>]> = ::std::sync::Arc::new(Framework {
-                        modules: self.modules.clone()
-                    });
-                    [<$first_type View>]::new(arc)
-                }
-
+            
+            // Framework已经实现了所有AccessTrait，它自动实现了各ViewTrait
+            
+            // 定义框架参数结构体
+            pub struct FrameworkArgs {
+                pub [<$first _arg>]: [<$first_type NewArg>],
                 $(
-                    pub fn [<$rest _view>](&self) -> [<$rest_type View>] {
-                        let arc: ::std::sync::Arc<dyn [<$rest_type ViewTrait>]> = ::std::sync::Arc::new(Framework {
-                            modules: self.modules.clone()
-                        });
-                        [<$rest_type View>]::new(arc)
-                    }
+                    pub [<$rest _arg>]: [<$rest_type NewArg>],
                 )*
+            }
 
-                pub async fn init(&mut self) -> $crate::framework::WSResult<()> {
-                    let total_size = [<$first:upper _SIZE>] $(+ [<$rest:upper _SIZE>])*;
-                    self.modules = Vec::with_capacity(total_size);
+            
+            // // 实现ViewTrait需要的方法（需要安全地访问其他模块）
+            // impl [<$first_type ViewTrait>] for Framework {
+            //     fn $first(&self) -> &$first_type {
+            //         unsafe {
+            //             let ptr = self.modules.as_ptr() as *const $first_type;
+            //             &*ptr
+            //         }
+            //     }
+            // }
+            
+            // $(
+            //     impl [<$rest_type ViewTrait>] for Framework {
+            //         fn $rest(&self) -> &$rest_type {
+            //             unsafe {
+            //                 let ptr = (self.modules.as_ptr().add(::std::mem::size_of::<$first_type>())) as *const $rest_type;
+            //                 &*ptr
+            //             }
+            //         }
+            //     }
+            // )*
+            
+            // 实现FrameworkTrait
+            impl Framework {
+                async fn init(&self, args: FrameworkArgs) -> WSResult<()> {
+                    let total_size = ::std::mem::size_of::<$first_type>() $(+ ::std::mem::size_of::<$rest_type>())*;
+                    // 使用内部可变性修改modules
+                    // let mut fw = Arc::get_mut(&mut self.0).expect("Arc should be unique");
+                    // fw.modules = Vec::with_capacity(total_size);
+                    let fw: &mut FrameworkInner = unsafe {
+                        &mut *(&self.0 as *const _ as *mut _)
+                    };
                     
                     // 初始化第一个模块
-                    let first_module = <$first_type>::init(self.[<$first _view>]()).await?;
+                    let first_module = <$first_type>::init(self.[<$first _view>](), args.[<$first _arg>]).await?;
                     let ptr = &first_module as *const $first_type;
                     unsafe {
-                        self.modules.extend_from_slice(::std::slice::from_raw_parts(
+                        fw.modules.extend_from_slice(::std::slice::from_raw_parts(
                             ptr as *const u8, 
-                            [<$first:upper _SIZE>]
+                            ::std::mem::size_of::<$first_type>()
                         ));
                     }
                     std::mem::forget(first_module);
 
                     // 初始化其他模块
-                    $(
-                        let module = <$rest_type>::init(self.[<$rest _view>]()).await?;
+                    $( 
+                        let module = <$rest_type>::init(self.[<$rest _view>](), args.[<$rest _arg>]).await?;
                         let ptr = &module as *const $rest_type;
                         unsafe {
-                            self.modules.extend_from_slice(::std::slice::from_raw_parts(
+                            fw.modules.extend_from_slice(::std::slice::from_raw_parts(
                                 ptr as *const u8, 
-                                [<$rest:upper _SIZE>]
+                                ::std::mem::size_of::<$rest_type>()
                             ));
                         }
                         std::mem::forget(module);
@@ -170,35 +186,43 @@ macro_rules! define_framework {
 
                     Ok(())
                 }
-
-                pub async fn shutdown(&self) -> $crate::framework::WSResult<()> {
+                
+                async fn shutdown(&self) -> WSResult<()> {
                     // 关闭第一个模块
                     let first_module = unsafe {
-                        &*(self.modules.as_ptr() as *const $first_type)
+                        &*(self.0.modules.as_ptr() as *const $first_type)
                     };
                     first_module.shutdown().await?;
 
                     // 关闭其他模块
                     $(
                         let module = unsafe {
-                            &*(self.modules.as_ptr().add([<$rest:upper _OFFSET>]) as *const $rest_type)
+                            &*(self.0.modules.as_ptr().add(::std::mem::size_of::<$first_type>()) as *const $rest_type)
                         };
                         module.shutdown().await?;
                     )*
-
+                    
                     Ok(())
                 }
+                
+                fn [<$first _view>](&self) -> [<$first_type View>] {
+                    // 先克隆self得到Framework实例，再装箱为Arc
+                    let framework = self.0.clone();
+                    let framework_arc: Arc<dyn [<$first_type ViewTrait>]> = framework;
+                    [<$first_type View>]::new(&framework_arc)
+                }
+                
+                $(
+                    fn [<$rest _view>](&self) -> [<$rest_type View>] {
+                        // 先克隆self得到Framework实例，再装箱为Arc
+                        let framework = self.0.clone();
+                        let framework_arc: Arc<dyn [<$rest_type ViewTrait>]> = framework;
+                        [<$rest_type View>]::new(&framework_arc)
+                    }
+                )*
             }
         }
     };
-}
-
-impl Framework {
-    pub fn new() -> Self {
-        Self {
-            modules: Vec::new()
-        }
-    }
 }
 
 #[cfg(test)]
@@ -216,12 +240,13 @@ mod tests {
     #[async_trait]
     impl LogicalModule for TestModuleB {
         type View = TestModuleBView;
+        type NewArg = TestModuleBNewArg;
 
         fn name(&self) -> &str {
             "TestModuleB"
         }
 
-        async fn init(_view: Self::View) -> WSResult<Self> {
+        async fn init(_view: Self::View, _arg: Self::NewArg) -> WSResult<Self> {
             Ok(Self {
                 _phantom: std::marker::PhantomData,
                 initialized: Mutex::new(true),
@@ -247,12 +272,13 @@ mod tests {
     #[async_trait]
     impl LogicalModule for TestModuleA {
         type View = TestModuleAView;
+        type NewArg = TestModuleANewArg;
 
         fn name(&self) -> &str {
             "TestModuleA"
         }
 
-        async fn init(_view: Self::View) -> WSResult<Self> {
+        async fn init(_view: Self::View, _arg: Self::NewArg) -> WSResult<Self> {
             Ok(Self {
                 _phantom: std::marker::PhantomData,
                 initialized: Mutex::new(true),
@@ -266,11 +292,16 @@ mod tests {
         }
     }
 
-    define_module!(TestModuleA, 
+    define_module!(TestModuleA,
         (a, TestModuleA),
         (b, TestModuleB)
     );
 
+    // 定义测试模块的NewArg
+    pub struct TestModuleANewArg;
+    pub struct TestModuleBNewArg;
+
+    
     define_framework! {
         b: TestModuleB,
         a: TestModuleA
@@ -291,7 +322,14 @@ mod tests {
         let mut fw = Framework::new();
         println!("Created new framework");
         
-        fw.init().await.unwrap();
+        // 创建测试参数
+        let args = FrameworkArgs {
+            a_arg: TestModuleANewArg,
+            b_arg: TestModuleBNewArg,
+        };
+        
+        // 使用trait方法初始化
+        fw.init(args).await.unwrap();
         println!("Initialized framework");
         
         // 通过 framework 获取 TestModuleA 的 view
@@ -308,7 +346,8 @@ mod tests {
         println!("TestModuleB name: {}", view.b().name());
         assert_eq!(view.b().name(), "TestModuleB");
         
-        fw.shutdown().await.unwrap();
+        // 使用trait方法关闭
+        <Framework as FrameworkTrait>::shutdown(&fw).await.unwrap();
         println!("Shutdown framework");
         
         // 验证模块已关闭

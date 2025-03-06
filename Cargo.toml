@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "tele_framework",
+    "tele_p2p",
 ]
 
 # 工作空间依赖，所有成员crate共享

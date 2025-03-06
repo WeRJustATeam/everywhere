@@ -12,17 +12,17 @@ tele_framework：
 - 然后用户又定义了业务逻辑module，根据声明顺序随后初始化
 这样实现的好处是，中间层逻辑无需关心后面的内存初始化，因为对他自己代码来说vector是个通用结构；而非具体类型
 framework项目测试不应该依赖外部模块
-view 实现应该用 define_framework 宏
-view 应该持有framework的weak dyn trait指针，在view初始化时，需要传入framework的借用
-view 用于获取framework_def 定义的 某个模块名对应的函数，通过unsafe转换可以得到模块的不可变借用
-view 的 功能是 对view对应trait的实现，由 define_framework 宏定义
-define_framework会定义 module的 access trait，view，  宏的参数为 模块名和模块类型 列表，和view的函数一一对应
-宏展开的过程中，通过paste还有展开时的递归，构建每个module size常量以及module前面module size求和，以作为偏移
 framework 维护一片vec内存用于存储modules
 modules 要约束实现Sync和Send
 module声明时要写宏 define_module, 这个宏会一起生成模块的View
 module不可以实现clone 和debug trait，如果有包含module的引用但是要实现debug，就手动实现
 module offset是由宏展开时计算的，外部不要想着去用它；因为只是为framework内部服务的
+view 实现应该随define_module一起生成
+view 应该持有framework的weak dyn trait指针，在view初始化时，需要传入framework的借用
+view 用于获取framework_def 定义的 某个模块名对应的函数，通过unsafe转换可以得到模块的不可变借用
+view 的 功能是 对view对应trait的实现，由 define_framework 宏定义
+define_framework会定义 module的 access trait，view，  宏的参数为 模块名和模块类型 列表，和view的函数一一对应
+宏展开的过程中，通过paste还有展开时的递归，构建每个module size常量以及module前面module size求和，以作为偏移
 
 #p2p 这一块参照原版 waverless m_p2p.rs responser对用户来说不应该是创建的，而是handler回调函数传入的参数
 基于 framework的各个模块项目：
@@ -38,3 +38,6 @@ tele_p2p：
   所以view的持有的framework应该是个trait，也在view宏定义生成；
 p2p 维护集群节点分布，持有NodesConfig
 result使用p2p自己的result
+RPCResponsor 和 RPCCaller 应该是 struct，而不是 trait, 并且带有数据包泛型
+请求和响应通过关联类型绑定
+MsgPack应该约束Default+Sized接口

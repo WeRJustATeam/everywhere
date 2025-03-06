@@ -1,5 +1,5 @@
-mod framework;
+pub mod framework;
 mod util;
 
-pub use framework::*;
+pub use framework::{ LogicalModule, WSResult};
 pub use util::*;
