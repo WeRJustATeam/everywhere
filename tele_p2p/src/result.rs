@@ -9,6 +9,7 @@ pub enum P2PError {
     SerdeError(String),
     ConnectionError(String),
     InvalidMessage(String),
+    Timeout(String),
     Other(String),
 }
 
@@ -19,6 +20,7 @@ impl fmt::Display for P2PError {
             P2PError::SerdeError(e) => write!(f, "Serialization error: {}", e),
             P2PError::ConnectionError(e) => write!(f, "Connection error: {}", e),
             P2PError::InvalidMessage(e) => write!(f, "Invalid message: {}", e),
+            P2PError::Timeout(e) => write!(f, "Timeout error: {}", e),
             P2PError::Other(e) => write!(f, "Other error: {}", e),
         }
     }

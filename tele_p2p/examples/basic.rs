@@ -6,9 +6,10 @@ use tele_p2p::{
     config::NodesConfig,
     m_p2p::{P2pModule, P2pModuleView, P2pModuleViewTrait, P2pModuleNewArg},
     result::P2PResult,
-    msg_pack::{MsgPack, RPCReq},
+    msg_pack::{MsgPack, RPCReq, MsgSender, RPCCaller, RPCHandler},
 };
-use tracing_subscriber::EnvFilter;
+use tracing::{info, debug, warn, error};
+use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 use paste::paste;
 use prost::bytes::Bytes;
 use tele_p2p::m_p2p::P2pModuleAccessTrait;
@@ -29,10 +30,12 @@ struct PingMsg;
 
 impl MsgPack for PingMsg {
     fn encode(&self) -> Vec<u8> {
+        debug!("编码 PingMsg");
         vec![]
     }
 
     fn decode(bytes: Bytes) -> P2PResult<Self> {
+        debug!("解码 PingMsg");
         Ok(PingMsg)
     }
 
@@ -46,10 +49,12 @@ struct PongMsg;
 
 impl MsgPack for PongMsg {
     fn encode(&self) -> Vec<u8> {
+        debug!("编码 PongMsg");
         vec![]
     }
 
     fn decode(bytes: Bytes) -> P2PResult<Self> {
+        debug!("解码 PongMsg");
         Ok(PongMsg)
     }
 
@@ -64,10 +69,12 @@ struct PingReq;
 
 impl MsgPack for PingReq {
     fn encode(&self) -> Vec<u8> {
+        debug!("编码 PingReq");
         vec![]
     }
 
     fn decode(bytes: Bytes) -> P2PResult<Self> {
+        debug!("解码 PingReq");
         Ok(PingReq)
     }
 
@@ -86,6 +93,7 @@ pub struct DemoModule {
 }
 
 // 为DemoModule添加NewArg结构体
+#[derive(Debug, Default, Clone)]
 pub struct DemoModuleNewArg {
     // 这个结构体目前不需要任何参数
 }
@@ -106,6 +114,8 @@ impl LogicalModule for DemoModule {
     }
 
     async fn init(view: Self::View, _arg: Self::NewArg) -> WSResult<Self> {
+        info!("初始化 DemoModule");
+        
         // 重置共享变量
         *THE_FIRST.lock() = false;
         *RECEIVED.lock() = false;
@@ -113,15 +123,24 @@ impl LogicalModule for DemoModule {
         // 从view获取p2p模块及节点ID
         let p2p = view.p2p_module();
         let this_node = p2p.nodes_config.this_node();
+        info!("当前节点ID: {}", this_node);
         
         // 注册 RPC 处理器
-        p2p.regist_rpc_recv(|resp, _req: PingReq| {
+        let rpc_handler = RPCHandler::<PingReq>::new();
+        let this_node_copy = this_node; // 复制节点ID以便在闭包中使用
+        rpc_handler.regist(p2p, move |resp, _req: PingReq| {
+            info!("节点 {} 接收到来自节点 {} 的ping请求", this_node_copy, resp.node_id());
             tokio::spawn(async move {
-                println!("节点 {} 接收到来自节点 {} 的ping请求", resp.node_id(), resp.node_id());
+                debug!("节点 {} 处理来自节点 {} 的ping请求", resp.node_id(), resp.node_id());
                 // 设置接收标志为true
                 *RECEIVED.lock() = true;
-                println!("节点 {} 设置RECEIVED为true", resp.node_id());
-                resp.send_resp(PongMsg).await.unwrap();
+                info!("节点 {} 设置RECEIVED为true", resp.node_id());
+                
+                // 发送响应
+                match resp.send_resp(PongMsg).await {
+                    Ok(_) => info!("节点 {} 成功发送pong响应", resp.node_id()),
+                    Err(e) => error!("节点 {} 发送pong响应失败: {}", resp.node_id(), e),
+                }
             });
             Ok(())
         });
@@ -131,7 +150,9 @@ impl LogicalModule for DemoModule {
         // 启动争抢任务
         tokio::spawn(async move {
             // 先等待一点随机时间，增加竞争的随机性
-            tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % 100)).await;
+            let wait_time = rand::random::<u64>() % 100;
+            debug!("节点 {} 将等待 {}ms 后尝试争抢", this_node, wait_time);
+            tokio::time::sleep(Duration::from_millis(wait_time)).await;
             
             // 尝试抢占THE_FIRST
             let is_first = {
@@ -145,49 +166,54 @@ impl LogicalModule for DemoModule {
             };
             
             if is_first {
-                println!("✅ 节点 {} 成功争抢到THE_FIRST标志", this_node);
+                info!("✅ 节点 {} 成功争抢到THE_FIRST标志", this_node);
                 // 获取对方节点ID
                 let target_node = if this_node == 1 { 2 } else { 1 };
 
                 // 发送请求到另一个节点
-                println!("节点 {} 将在5秒内尝试发送请求到节点 {}", this_node, target_node);
+                info!("节点 {} 将在5秒内尝试发送请求到节点 {}", this_node, target_node);
+                
+                // 使用RPCCaller发送请求
+                let rpc_caller = RPCCaller::<PingReq>::new();
+                rpc_caller.regist(view2.p2p_module());
+                
                 match tokio::time::timeout(
                     Duration::from_secs(5),
-                    view2.p2p_module().call_rpc(target_node, PingReq, None)
+                    rpc_caller.call(view2.p2p_module(), target_node, PingReq, Some(Duration::from_secs(3)))
                 ).await {
                     Ok(result) => {
                         match result {
                             Ok(_) => {
-                                println!("✅ 节点 {} 成功发送请求到节点 {}", this_node, target_node);
+                                info!("✅ 节点 {} 成功发送请求到节点 {} 并收到响应", this_node, target_node);
                                 // 检查是否收到响应
                                 if *RECEIVED.lock() {
-                                    println!("✅ 确认RECEIVED已设置为true");
+                                    info!("✅ 确认RECEIVED已设置为true");
                                 } else {
-                                    println!("❌ 警告：RECEIVED未设置为true");
+                                    warn!("❌ 警告：RECEIVED未设置为true");
                                 }
                             },
-                            Err(e) => println!("❌ 节点 {} RPC调用失败: {}", this_node, e),
+                            Err(e) => error!("❌ 节点 {} RPC调用失败: {}", this_node, e),
                         }
                     },
-                    Err(_) => println!("❌ 节点 {} 发送请求超时", this_node),
+                    Err(_) => error!("❌ 节点 {} 发送请求超时", this_node),
                 }
             } else {
-                println!("❌ 节点 {} 未争抢到THE_FIRST标志", this_node);
+                info!("❌ 节点 {} 未争抢到THE_FIRST标志", this_node);
                 // 等待5秒，看是否收到请求
-                println!("节点 {} 将等待5秒，查看是否收到请求", this_node);
+                info!("节点 {} 将等待5秒，查看是否收到请求", this_node);
                 if let Err(_) = tokio::time::timeout(
                     Duration::from_secs(5),
                     async {
                         loop {
                             if *RECEIVED.lock() {
-                                println!("✅ 节点 {} 确认已接收到请求并设置RECEIVED为true", this_node);
+                                info!("✅ 节点 {} 确认已接收到请求并设置RECEIVED为true", this_node);
                                 break;
                             }
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                 ).await {
-                    println!("❌ 节点 {} 等待请求超时，未收到请求", this_node);
+                    warn!("❌ 节点 {} 等待请求超时，未收到请求", this_node);
                 }
             }
         });
@@ -195,12 +221,13 @@ impl LogicalModule for DemoModule {
         // 完成所有操作后，创建模块实例
         let module = Self { view };
         
-        tracing::info!("DemoModule initialized");
+        info!("DemoModule 初始化完成");
 
         Ok(module)
     }
 
     async fn shutdown(&self) -> WSResult<()> {
+        info!("关闭 DemoModule");
         Ok(())
     }
 }
@@ -215,8 +242,16 @@ define_framework! {
 
 #[tokio::main]
 async fn main() -> WSResult<()> {
-    // 初始化日志
-    let _=tracing_subscriber::fmt::try_init().unwrap();
+    // 初始化日志，添加更详细的配置
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("tele_p2p=debug".parse().unwrap()))
+        .with_span_events(FmtSpan::CLOSE)
+        .finish();
+    
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("设置全局日志订阅器失败");
+    
+    info!("启动P2P示例程序");
 
     // 创建两个节点的配置
     let config1 = NodesConfig::new(
@@ -226,6 +261,7 @@ async fn main() -> WSResult<()> {
             (2, "127.0.0.1:10002".parse().unwrap()),
         ],
     );
+    info!("创建节点1配置: {:?}", config1.this);
 
     let config2 = NodesConfig::new(
         2,
@@ -234,6 +270,7 @@ async fn main() -> WSResult<()> {
             (2, "127.0.0.1:10002".parse().unwrap()),
         ],
     );
+    info!("创建节点2配置: {:?}", config2.this);
 
     // 创建P2P模块的初始化参数
     let p2p_arg1 = P2pModuleNewArg::new(config1);
@@ -245,26 +282,30 @@ async fn main() -> WSResult<()> {
     // 创建框架参数
     let framework_args1 = FrameworkArgs {
         p2p_arg: p2p_arg1,
-        demo_arg: demo_arg,
+        demo_arg: demo_arg.clone(),
     };
     
     let framework_args2 = FrameworkArgs {
         p2p_arg: p2p_arg2,
-        demo_arg: DemoModuleNewArg::new(),
+        demo_arg: demo_arg,
     };
 
     // 创建框架实例 
     let framework1 = Framework::new();
     let framework2 = Framework::new();
+    info!("创建框架实例完成");
 
     // 初始化框架，传入参数 - 通过trait方法
+    info!("初始化节点1框架");
     framework1.init(framework_args1).await?;
+    info!("初始化节点2框架");
     framework2.init(framework_args2).await?;
 
-    println!("两个节点启动成功，按Ctrl+C退出");
+    info!("两个节点启动成功，按Ctrl+C退出");
 
     // 等待 Ctrl+C
     tokio::signal::ctrl_c().await?;
+    info!("接收到Ctrl+C信号，程序退出");
 
     Ok(())
 } 
