@@ -41,6 +41,7 @@ macro_rules! define_module {
             {}
 
             // 定义View结构体
+            #[derive(Clone)]
             pub struct [<$module View>] {
                 pub view: std::sync::Weak<dyn [<$module ViewTrait>]>
             }

@@ -12,6 +12,16 @@ use tracing_subscriber::EnvFilter;
 use paste::paste;
 use prost::bytes::Bytes;
 use tele_p2p::m_p2p::P2pModuleAccessTrait;
+use std::time::Duration;
+use rand;
+use parking_lot::Mutex;
+use lazy_static::lazy_static;
+
+// 定义共享变量
+lazy_static! {
+    static ref THE_FIRST: Mutex<bool> = Mutex::new(false);
+    static ref RECEIVED: Mutex<bool> = Mutex::new(false);
+}
 
 // 定义消息类型
 #[derive(Debug, Default)]
@@ -96,27 +106,96 @@ impl LogicalModule for DemoModule {
     }
 
     async fn init(view: Self::View, _arg: Self::NewArg) -> WSResult<Self> {
-        // 创建模块实例
-        let module = Self { view };
-
+        // 重置共享变量
+        *THE_FIRST.lock() = false;
+        *RECEIVED.lock() = false;
+        
+        // 从view获取p2p模块及节点ID
+        let p2p = view.p2p_module();
+        let this_node = p2p.nodes_config.this_node();
+        
         // 注册 RPC 处理器
-        module.view.p2p_module().regist_rpc_recv(|resp, _req: PingReq| {
+        p2p.regist_rpc_recv(|resp, _req: PingReq| {
             tokio::spawn(async move {
-                println!("Node received ping from node {}", resp.node_id());
+                println!("节点 {} 接收到来自节点 {} 的ping请求", resp.node_id(), resp.node_id());
+                // 设置接收标志为true
+                *RECEIVED.lock() = true;
+                println!("节点 {} 设置RECEIVED为true", resp.node_id());
                 resp.send_resp(PongMsg).await.unwrap();
             });
             Ok(())
         });
+        
+        // 克隆P2P模块以便在任务中使用
+        let view2 = view.clone();
+        // 启动争抢任务
+        tokio::spawn(async move {
+            // 先等待一点随机时间，增加竞争的随机性
+            tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % 100)).await;
+            
+            // 尝试抢占THE_FIRST
+            let is_first = {
+                let mut lock = THE_FIRST.lock();
+                if !*lock {
+                    *lock = true;
+                    true
+                } else {
+                    false
+                }
+            };
+            
+            if is_first {
+                println!("✅ 节点 {} 成功争抢到THE_FIRST标志", this_node);
+                // 获取对方节点ID
+                let target_node = if this_node == 1 { 2 } else { 1 };
 
+                // 发送请求到另一个节点
+                println!("节点 {} 将在5秒内尝试发送请求到节点 {}", this_node, target_node);
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    view2.p2p_module().call_rpc(target_node, PingReq, None)
+                ).await {
+                    Ok(result) => {
+                        match result {
+                            Ok(_) => {
+                                println!("✅ 节点 {} 成功发送请求到节点 {}", this_node, target_node);
+                                // 检查是否收到响应
+                                if *RECEIVED.lock() {
+                                    println!("✅ 确认RECEIVED已设置为true");
+                                } else {
+                                    println!("❌ 警告：RECEIVED未设置为true");
+                                }
+                            },
+                            Err(e) => println!("❌ 节点 {} RPC调用失败: {}", this_node, e),
+                        }
+                    },
+                    Err(_) => println!("❌ 节点 {} 发送请求超时", this_node),
+                }
+            } else {
+                println!("❌ 节点 {} 未争抢到THE_FIRST标志", this_node);
+                // 等待5秒，看是否收到请求
+                println!("节点 {} 将等待5秒，查看是否收到请求", this_node);
+                if let Err(_) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    async {
+                        loop {
+                            if *RECEIVED.lock() {
+                                println!("✅ 节点 {} 确认已接收到请求并设置RECEIVED为true", this_node);
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                ).await {
+                    println!("❌ 节点 {} 等待请求超时，未收到请求", this_node);
+                }
+            }
+        });
 
+        // 完成所有操作后，创建模块实例
+        let module = Self { view };
+        
         tracing::info!("DemoModule initialized");
-        // // 发送测试消息
-        // if module.view.p2p_module().nodes_config.this_node() == 1 {
-        //     match module.view.p2p_module().call_rpc(2, PingReq, None).await {
-        //         Ok(_) => println!("Node 1 received pong from node 2"),
-        //         Err(e) => println!("RPC failed: {}", e),
-        //     }
-        // }
 
         Ok(module)
     }
