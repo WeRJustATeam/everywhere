@@ -18,6 +18,7 @@ use crate::{
     config::NodesConfig,
     result::{P2PError, P2PResult},
     msg_pack::{MsgPack, RPCReq},
+    m_p2p_quic::P2PQuicNode,
 };
 
 pub type TaskId = u32;
@@ -34,6 +35,9 @@ pub trait P2PKernel: Send + Sync {
         msg_id: MsgId,
         req_data: Vec<u8>,
     ) -> P2PResult<()>;
+    
+    // 添加start方法到trait定义
+    async fn start(&self) -> P2PResult<()>;
 }
 
 pub enum DispatchPayload<M: MsgPack> {
@@ -112,26 +116,6 @@ pub struct P2pModule {
     pub view: Option<P2pModuleView>,
 }
 
-// 创建一个空的P2PKernel实现用于测试
-struct DummyKernel;
-
-#[async_trait]
-impl P2PKernel for DummyKernel {
-    async fn send_for_response(&self, _nodeid: NodeID, _req_data: Vec<u8>) -> P2PResult<Vec<u8>> {
-        Ok(vec![])
-    }
-    
-    async fn send(
-        &self,
-        _node: NodeID,
-        _task_id: TaskId,
-        _msg_id: MsgId,
-        _req_data: Vec<u8>,
-    ) -> P2PResult<()> {
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl LogicalModule for P2pModule {
     type View = P2pModuleView;
@@ -143,18 +127,39 @@ impl LogicalModule for P2pModule {
 
     async fn init(view: Self::View, arg: Self::NewArg) -> WSResult<Self> {
         info!("初始化 P2pModule");
-        // 初始化逻辑
-        Ok(Self {
+        
+        // 创建P2PQuicNode替代DummyKernel
+        info!("创建P2PQuicNode作为P2P内核");
+        let mut p2p_quic_node = P2PQuicNode::new(arg.nodes_config.clone());
+        
+        // 设置view
+        info!("设置P2pModuleView到P2PQuicNode");
+        p2p_quic_node.set_view(view.clone());
+        
+        // 初始化模块
+        let module = Self {
             view: Some(view),
-            // 其他字段初始化
             dispatch_map: RwLock::new(HashMap::new()),
             waiting_tasks: crossbeam_skiplist::SkipMap::new(),
-            p2p_kernel: Box::new(DummyKernel),
+            p2p_kernel: Box::new(p2p_quic_node),
             nodes_config: arg.nodes_config,
             next_task_id: AtomicU32::new(0),
             initialized: Mutex::new(true),
             shutdown: Mutex::new(false),
-        })
+        };
+        
+        // 启动P2P内核
+        info!("启动P2P内核");
+        if let Err(e) = module.p2p_kernel.start().await {
+            error!("启动P2P内核失败: {}", e);
+            // 转换错误类型
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other, 
+                format!("启动P2P内核失败: {}", e)
+            )));
+        }
+        
+        Ok(module)
     }
 
     async fn shutdown(&self) -> WSResult<()> {

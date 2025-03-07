@@ -3,7 +3,7 @@ use std::net::{SocketAddr, IpAddr};
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::str::FromStr;
 use std::time::Duration;
-use crate::m_p2p::{TaskId, MsgId, NodeID, P2PKernel};
+use crate::m_p2p::{TaskId, MsgId, NodeID, P2PKernel, P2pModuleView, P2pModule, P2pModuleViewTrait};
 use crate::msg_pack::MsgPack;
 use crate::result::{P2PResult, P2PError};
 use crate::config::NodesConfig;
@@ -17,6 +17,7 @@ pub struct P2PQuicNode {
     shared: Arc<P2PQuicNodeShared>,
     locked: Arc<P2PQuicNodeLocked>,
     config: NodesConfig,
+    view: Option<P2pModuleView>,
 }
 
 struct P2PQuicNodeShared {
@@ -43,6 +44,7 @@ struct Connection {
 impl P2PQuicNode {
     pub fn new(config: NodesConfig) -> Self {
         info!("创建P2PQuicNode，本节点ID: {}", config.this.0);
+        println!("----- P2PQuicNode::new 被调用! 节点ID: {} -----", config.this.0);
         Self {
             shared: Arc::new(P2PQuicNodeShared {
                 peer_conns: RwLock::new(HashMap::new()),
@@ -51,32 +53,37 @@ impl P2PQuicNode {
                 sub_tasks: Mutex::new(Vec::new()),
             }),
             config,
+            view: None,
         }
     }
 
-    pub async fn start(&self) -> P2PResult<()> {
+    pub fn set_view(&mut self, view: P2pModuleView) {
+        info!("设置P2pModuleView");
+        self.view = Some(view);
+    }
+
+    pub async fn start_internal(&self) -> P2PResult<()> {
         info!("启动P2PQuicNode，监听地址: {}", self.config.this.1.addr);
         
-        // 创建监听端点
         let listen_addr = SocketAddr::new(
             IpAddr::from_str("0.0.0.0").unwrap(),
             self.config.this.1.addr.port()
         );
         
-        // 为每个对等节点创建连接
         for (peer_id, peer_config) in &self.config.peers {
             let peer_addr = peer_config.addr;
             info!("准备连接到节点: {} ({})", peer_id, peer_addr);
             
-            // 创建连接池
             self.reserve_peer_conn(peer_addr).await?;
             
-            // 启动连接任务
             let shared = self.shared.clone();
             let this_addr = self.config.this.1.addr;
+            let view_clone = self.view.clone();
+            let config_clone = self.config.clone();
+            
             let task = tokio::spawn(async move {
                 loop {
-                    match Self::connect_to_peer(peer_addr, this_addr, shared.clone()).await {
+                    match Self::connect_to_peer(peer_addr, this_addr, shared.clone(), view_clone.clone(), config_clone.clone()).await {
                         Ok(_) => {
                             debug!("成功连接到节点: {}", peer_addr);
                         }
@@ -91,11 +98,13 @@ impl P2PQuicNode {
             self.locked.sub_tasks.lock().push(task);
         }
         
-        // 启动监听任务
         let shared = self.shared.clone();
         let this_addr = self.config.this.1.addr;
+        let view_clone = self.view.clone();
+        let config_clone = self.config.clone();
+        
         let task = tokio::spawn(async move {
-            if let Err(e) = Self::listen_for_connections(listen_addr, this_addr, shared).await {
+            if let Err(e) = Self::listen_for_connections(listen_addr, this_addr, shared, view_clone, config_clone).await {
                 error!("监听连接失败: {}", e);
             }
         });
@@ -109,11 +118,11 @@ impl P2PQuicNode {
         peer_addr: SocketAddr,
         this_addr: SocketAddr,
         shared: Arc<P2PQuicNodeShared>,
+        view: Option<P2pModuleView>,
+        config: NodesConfig,
     ) -> P2PResult<()> {
         info!("尝试连接到节点: {}", peer_addr);
         
-        // 这里应该实现实际的QUIC连接
-        // 为了简化，我们创建一个模拟连接
         let (tx, rx) = mpsc::channel(100);
         
         let conn = Connection {
@@ -122,7 +131,6 @@ impl P2PQuicNode {
             sender: tx,
         };
         
-        // 获取连接池
         let pool = {
             let conns = shared.peer_conns.read();
             conns.get(&peer_addr).cloned().ok_or_else(|| {
@@ -130,7 +138,6 @@ impl P2PQuicNode {
             })?
         };
         
-        // 添加连接到池中
         {
             let mut conns = pool.connections.write();
             conns.push(conn);
@@ -138,9 +145,8 @@ impl P2PQuicNode {
             debug!("添加连接到池中，当前活跃连接数: {}", pool.active_count.load(Ordering::SeqCst));
         }
         
-        // 启动接收任务
         tokio::spawn(async move {
-            Self::handle_connection(peer_addr, this_addr, rx).await;
+            Self::handle_connection(peer_addr, this_addr, rx, view, config).await;
         });
         
         Ok(())
@@ -150,13 +156,11 @@ impl P2PQuicNode {
         listen_addr: SocketAddr,
         this_addr: SocketAddr,
         shared: Arc<P2PQuicNodeShared>,
+        view: Option<P2pModuleView>,
+        config: NodesConfig,
     ) -> P2PResult<()> {
         info!("开始监听连接: {}", listen_addr);
         
-        // 这里应该实现实际的QUIC监听
-        // 为了简化，我们只是模拟监听
-        
-        // 无限循环，模拟持续监听
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             debug!("监听中...");
@@ -167,26 +171,54 @@ impl P2PQuicNode {
         peer_addr: SocketAddr,
         this_addr: SocketAddr,
         mut rx: Receiver<Vec<u8>>,
+        view: Option<P2pModuleView>,
+        config: NodesConfig,
     ) {
         info!("处理来自 {} 的连接", peer_addr);
         
+        let peer_node_id = find_peer_id_from_config(&config, peer_addr);
+        
+        let peer_node_id = match peer_node_id {
+            Some(id) => {
+                info!("找到peer_addr {} 对应的节点ID: {}", peer_addr, id);
+                id
+            },
+            None => {
+                error!("无法找到peer_addr {} 对应的节点ID", peer_addr);
+                return;
+            }
+        };
+        
         while let Some(data) = rx.recv().await {
-            debug!("收到来自 {} 的数据，大小: {} 字节", peer_addr, data.len());
+            debug!("收到来自节点 {} 的数据，大小: {} 字节", peer_node_id, data.len());
             
-            // 这里应该解析消息并分发
-            // 为了简化，我们只是记录日志
-            
-            // 解析消息头
             if data.len() < 8 {
-                warn!("收到的数据太短，无法解析消息头");
+                warn!("收到的数据太短，无法解析消息头: {} 字节", data.len());
                 continue;
             }
             
-            // 模拟消息处理
-            debug!("处理消息完成");
+            let msg_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            let task_id = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            debug!("解析消息: msg_id={}, task_id={}", msg_id, task_id);
+            
+            let message_body = if data.len() > 8 {
+                data[8..].to_vec()
+            } else {
+                Vec::new()
+            };
+            
+            if let Some(view) = &view {
+                debug!("分发消息到P2pModule: 节点={}, 消息ID={}, 任务ID={}", 
+                       peer_node_id, msg_id, task_id);
+                
+                let p2p = view.p2p_module();
+                p2p.dispatch(peer_node_id, msg_id, task_id, message_body);
+            } else {
+                error!("未设置P2pModuleView，无法分发消息");
+            }
         }
         
-        info!("与 {} 的连接已关闭", peer_addr);
+        info!("与节点 {} 的连接已关闭", peer_node_id);
     }
 
     pub async fn send<M: MsgPack>(&self, addr: SocketAddr, msg: M) -> P2PResult<()> {
@@ -216,7 +248,6 @@ impl P2PQuicNode {
             return Err(P2PError::ConnectionError(format!("节点 {} 没有活跃连接", addr)));
         }
         
-        // 使用轮询方式选择连接
         let idx = pool.next_conn_index.fetch_add(1, Ordering::SeqCst) % conns.len();
         let conn = &conns[idx];
         
@@ -236,6 +267,26 @@ impl P2PQuicNode {
         }
         Ok(())
     }
+
+    fn find_peer_id(&self, addr: SocketAddr) -> Option<NodeID> {
+        for (id, node_config) in &self.config.peers {
+            if node_config.addr == addr {
+                return Some(*id);
+            }
+        }
+        None
+    }
+}
+
+impl Clone for P2PQuicNode {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            locked: self.locked.clone(),
+            config: self.config.clone(),
+            view: self.view.clone(),
+        }
+    }
 }
 
 #[async_trait]
@@ -251,7 +302,6 @@ impl P2PKernel for P2PQuicNode {
         
         debug!("发送请求到节点 {}，等待响应", nodeid);
         
-        // 发送请求
         let sender = self.get_connection(addr).await?;
         
         sender.send(req_data).await.map_err(|e| {
@@ -259,13 +309,8 @@ impl P2PKernel for P2PQuicNode {
             P2PError::ConnectionError(format!("发送请求失败: {}", e))
         })?;
         
-        // 创建一个响应通道
         let (tx, rx) = tokio::sync::oneshot::channel();
         
-        // 在实际实现中，我们应该注册这个通道以接收响应
-        // 为了简化，我们直接返回一个空响应
-        
-        // 等待响应，带超时
         match tokio::time::timeout(Duration::from_secs(30), rx).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => {
@@ -296,17 +341,14 @@ impl P2PKernel for P2PQuicNode {
         
         debug!("发送消息到节点 {}，任务ID: {}，消息ID: {}", node, task_id, msg_id);
         
-        // 构建消息头
         let mut header = Vec::with_capacity(8);
         header.extend_from_slice(&msg_id.to_le_bytes());
         header.extend_from_slice(&task_id.to_le_bytes());
         
-        // 构建完整消息
         let mut message = Vec::with_capacity(header.len() + req_data.len());
         message.extend_from_slice(&header);
         message.extend_from_slice(&req_data);
         
-        // 发送消息
         let sender = self.get_connection(addr).await?;
         
         sender.send(message).await.map_err(|e| {
@@ -316,4 +358,18 @@ impl P2PKernel for P2PQuicNode {
         
         Ok(())
     }
+
+    async fn start(&self) -> P2PResult<()> {
+        info!("P2PKernel::start - 调用P2PQuicNode::start_internal");
+        self.start_internal().await
+    }
+}
+
+fn find_peer_id_from_config(config: &NodesConfig, addr: SocketAddr) -> Option<NodeID> {
+    for (id, node_config) in &config.peers {
+        if node_config.addr == addr {
+            return Some(*id);
+        }
+    }
+    None
 } 

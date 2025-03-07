@@ -150,9 +150,8 @@ impl LogicalModule for DemoModule {
         // 启动争抢任务
         tokio::spawn(async move {
             // 先等待一点随机时间，增加竞争的随机性
-            let wait_time = rand::random::<u64>() % 100;
-            debug!("节点 {} 将等待 {}ms 后尝试争抢", this_node, wait_time);
-            tokio::time::sleep(Duration::from_millis(wait_time)).await;
+            debug!("节点 {} 将等待 {}ms 后尝试争抢", this_node, 10);
+            tokio::time::sleep(Duration::from_secs(10)).await;
             
             // 尝试抢占THE_FIRST
             let is_first = {
@@ -300,6 +299,11 @@ async fn main() -> WSResult<()> {
     framework1.init(framework_args1).await?;
     info!("初始化节点2框架");
     framework2.init(framework_args2).await?;
+
+    info!("两个节点启动成功，等待10秒钟让节点互联...");
+    // 添加10秒等待时间，让节点有足够的时间建立连接
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    info!("等待结束，节点应该已经互联");
 
     info!("两个节点启动成功，按Ctrl+C退出");
 

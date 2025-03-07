@@ -30,6 +30,8 @@ define_framework会定义 module的 access trait，view，  宏的参数为 模�
 对所有项目通用的规则：
 - 每个项目的result都用自己的，而不是用一个集中的；避免相互依赖
 - debug 能用的情况下不要实现display
+- 想要进闭包或新的任务(future async {} 其实也类似闭包)访问Module，需要用view的clone
+  而 view 从哪里来，是在init时传入的，可以将其保存到module结构体下
 
 
 tele_p2p：

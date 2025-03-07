@@ -1,8 +1,0 @@
-# P2P聊天程序配置
-nodes:
-  node1:  # 节点ID
-    bind_address: "127.0.0.1:8080"  # 绑定地址
-  node2:  # 节点ID
-    bind_address: "127.0.0.1:8081"  # 绑定地址
-  node3:  # 节点ID
-    bind_address: "127.0.0.1:8082"  # 绑定地址
