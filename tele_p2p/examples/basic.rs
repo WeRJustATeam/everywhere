@@ -108,16 +108,15 @@ impl LogicalModule for DemoModule {
             Ok(())
         });
 
-        // 等待一会儿让连接建立
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        // 发送测试消息
-        if module.view.p2p_module().nodes_config.this_node() == 1 {
-            match module.view.p2p_module().call_rpc(2, PingReq, None).await {
-                Ok(_) => println!("Node 1 received pong from node 2"),
-                Err(e) => println!("RPC failed: {}", e),
-            }
-        }
+        tracing::info!("DemoModule initialized");
+        // // 发送测试消息
+        // if module.view.p2p_module().nodes_config.this_node() == 1 {
+        //     match module.view.p2p_module().call_rpc(2, PingReq, None).await {
+        //         Ok(_) => println!("Node 1 received pong from node 2"),
+        //         Err(e) => println!("RPC failed: {}", e),
+        //     }
+        // }
 
         Ok(module)
     }
@@ -138,9 +137,7 @@ define_framework! {
 #[tokio::main]
 async fn main() -> WSResult<()> {
     // 初始化日志
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    let _=tracing_subscriber::fmt::try_init().unwrap();
 
     // 创建两个节点的配置
     let config1 = NodesConfig::new(

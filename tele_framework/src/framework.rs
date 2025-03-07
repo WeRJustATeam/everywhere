@@ -26,7 +26,7 @@ macro_rules! define_module {
             // 定义模块的AccessTrait
             #[async_trait::async_trait]
             pub trait [<$module AccessTrait>]: Send + Sync {
-                fn [<$module:snake>](&self) -> &Arc<$module>;
+                fn [<$module:snake>](&self) -> &$module;
             }
 
             // 创建一个新trait，将所有依赖的AccessTrait作为supertrait
@@ -48,6 +48,7 @@ macro_rules! define_module {
             // View实现
             impl [<$module View>] {
                 pub fn new(view: &Arc<dyn [<$module ViewTrait>]>) -> Self {
+                    //println!("new view of {}", stringify!($module));
                     Self { 
                         view: Arc::downgrade(view)
                     }
@@ -56,11 +57,16 @@ macro_rules! define_module {
                 // 获取每个依赖模块
                 $(
                     pub fn [<$dep_type:snake>](&self) -> &$dep_type {
-                        // 直接访问，不需要安全检查，因为这是在框架内部使用
-                        unsafe {
-                            let ptr: *const dyn [<$module ViewTrait>] = std::mem::transmute(self.view.as_ptr());
-                            (*ptr).[<$dep_type:snake>]()
-                        }
+                        //println!("accessing {}", stringify!($dep_type));
+                        let ret=unsafe {
+                            // 直接访问，不需要安全检查，因为这是在框架内部使用
+                            let ptr = std::ptr::NonNull::new(self.view.as_ptr() as *const _ as *mut _).unwrap();
+                            let view_ref: &dyn [<$module ViewTrait>] = ptr.as_ref();
+                            let module_ptr=std::ptr::NonNull::new(view_ref.[<$dep_type:snake>]() as *const _ as *mut _).unwrap();
+                            module_ptr.as_ref()
+                        };
+                        //println!("accessed {}", stringify!($dep_type));
+                        ret
                     }
                 )*
             }
@@ -72,47 +78,36 @@ macro_rules! define_module {
 macro_rules! define_framework {
     ($first:ident: $first_type:ty $(, $rest:ident: $rest_type:ty)*) => {
         paste! {
+            // expand the modules
+            #[derive(Default)]
             pub struct FrameworkInner {
-                pub modules: Vec<u8>,
+                [<$first_type:snake>]: Option<$first_type>,
+                $(
+                    [<$rest_type:snake>]: Option<$rest_type>,
+                )*
             }
 
             pub struct Framework(Arc<FrameworkInner>);
 
             impl Framework {
                 pub fn new() -> Self {
-                    Self(Arc::new(FrameworkInner {
-                        modules: Vec::new(),
-                    }))
+                    Self(Arc::new(FrameworkInner::default()))
                 }
             }
 
             // 为Framework实现各个模块的AccessTrait
             #[async_trait::async_trait]
             impl [<$first_type AccessTrait>] for FrameworkInner {
-                fn [<$first_type:snake>](&self) -> &Arc<$first_type> {
-                    // 使用unsafe获取第一个模块
-                    unsafe {
-                        // 将原来存储的字节转换为模块指针
-                        let ptr = self.modules.as_ptr() as *const $first_type;
-                        // 包装为Arc
-                        std::mem::transmute::<&$first_type, &Arc<$first_type>>(&*ptr)
-                    }
+                fn [<$first_type:snake>](&self) -> &$first_type {
+                    self.[<$first_type:snake>].as_ref().unwrap()
                 }
             }
             
             $(
                 #[async_trait::async_trait]
                 impl [<$rest_type AccessTrait>] for FrameworkInner {
-                    fn [<$rest_type:snake>](&self) -> &Arc<$rest_type> {
-                        // 使用unsafe获取其他模块
-                        unsafe {
-                            // 计算偏移量
-                            let offset = ::std::mem::size_of::<$first_type>();
-                            // 将原来存储的字节转换为模块指针
-                            let ptr = (self.modules.as_ptr().add(offset)) as *const $rest_type;
-                            // 包装为Arc
-                            std::mem::transmute::<&$rest_type, &Arc<$rest_type>>(&*ptr)
-                        }
+                    fn [<$rest_type:snake>](&self) -> &$rest_type {
+                        self.[<$rest_type:snake>].as_ref().unwrap()
                     }
                 }
             )*
@@ -156,67 +151,60 @@ macro_rules! define_framework {
                     // 使用内部可变性修改modules
                     // let mut fw = Arc::get_mut(&mut self.0).expect("Arc should be unique");
                     // fw.modules = Vec::with_capacity(total_size);
-                    let fw: &mut FrameworkInner = unsafe {
-                        &mut *(&self.0 as *const _ as *mut _)
-                    };
+                    let fw: &mut FrameworkInner = unsafe { ::std::ptr::NonNull::new(
+                        // deref the arc and get ref of inner
+                        ((&*self.0) as *const _ as *mut _)
+                    ).unwrap().as_mut()};
                     
                     // 初始化第一个模块
-                    let first_module = <$first_type>::init(self.[<$first _view>](), args.[<$first _arg>]).await?;
-                    let ptr = &first_module as *const $first_type;
-                    unsafe {
-                        fw.modules.extend_from_slice(::std::slice::from_raw_parts(
-                            ptr as *const u8, 
-                            ::std::mem::size_of::<$first_type>()
-                        ));
-                    }
-                    std::mem::forget(first_module);
-
+                    
+                    let [<inited_ $first_type:snake>]: Option<$first_type> = Some(<$first_type>::init(self.[<$first _view>](), args.[<$first _arg>]).await?);
+                    //println!("initializing {}", stringify!($first_type));
+                    fw.[<$first_type:snake>] = [<inited_ $first_type:snake>];
+                    //println!("initialized {}", stringify!($first_type));
+                    
                     // 初始化其他模块
                     $( 
-                        let module = <$rest_type>::init(self.[<$rest _view>](), args.[<$rest _arg>]).await?;
-                        let ptr = &module as *const $rest_type;
-                        unsafe {
-                            fw.modules.extend_from_slice(::std::slice::from_raw_parts(
-                                ptr as *const u8, 
-                                ::std::mem::size_of::<$rest_type>()
-                            ));
-                        }
-                        std::mem::forget(module);
+                        //println!("bf initializing {}", stringify!($rest_type));
+                        let [<inited_ $rest_type:snake>]: Option<$rest_type> = Some(<$rest_type>::init(self.[<$rest _view>](), args.[<$rest _arg>]).await?);
+                        //println!("initializing {}", stringify!($rest_type));
+                        fw.[<$rest_type:snake>] = [<inited_ $rest_type:snake>];
+                        //println!("initialized {}", stringify!($rest_type));
                     )*
 
+                    //println!("initialized");
+                    tracing::info!("framework initialized");
                     Ok(())
                 }
                 
                 async fn shutdown(&self) -> WSResult<()> {
-                    // 关闭第一个模块
-                    let first_module = unsafe {
-                        &*(self.0.modules.as_ptr() as *const $first_type)
-                    };
-                    first_module.shutdown().await?;
-
-                    // 关闭其他模块
+                    
+                    self.0.[<$first_type:snake>].as_ref().unwrap().shutdown().await?;
                     $(
-                        let module = unsafe {
-                            &*(self.0.modules.as_ptr().add(::std::mem::size_of::<$first_type>()) as *const $rest_type)
-                        };
-                        module.shutdown().await?;
+                        self.0.[<$rest_type:snake>].as_ref().unwrap().shutdown().await?;
                     )*
                     
                     Ok(())
                 }
                 
                 fn [<$first _view>](&self) -> [<$first_type View>] {
+                    //println!("getting view of {}", stringify!($first_type));
                     // 先克隆self得到Framework实例，再装箱为Arc
                     let framework = self.0.clone();
+                    //println!("got arc of framework");
                     let framework_arc: Arc<dyn [<$first_type ViewTrait>]> = framework;
+                    //println!("got dyn view trait of {}", stringify!($first_type));
                     [<$first_type View>]::new(&framework_arc)
                 }
                 
                 $(
                     fn [<$rest _view>](&self) -> [<$rest_type View>] {
+                        //println!("getting view of {}", stringify!($rest_type));
                         // 先克隆self得到Framework实例，再装箱为Arc
                         let framework = self.0.clone();
+                        //println!("got arc of framework");
                         let framework_arc: Arc<dyn [<$rest_type ViewTrait>]> = framework;
+                        //println!("got dyn view trait of {}", stringify!($rest_type));
                         [<$rest_type View>]::new(&framework_arc)
                     }
                 )*
@@ -247,6 +235,7 @@ mod tests {
         }
 
         async fn init(_view: Self::View, _arg: Self::NewArg) -> WSResult<Self> {
+            //println!("initializing TestModuleB");
             Ok(Self {
                 _phantom: std::marker::PhantomData,
                 initialized: Mutex::new(true),
@@ -279,6 +268,7 @@ mod tests {
         }
 
         async fn init(_view: Self::View, _arg: Self::NewArg) -> WSResult<Self> {
+            //println!("initializing TestModuleA");
             Ok(Self {
                 _phantom: std::marker::PhantomData,
                 initialized: Mutex::new(true),
@@ -303,24 +293,27 @@ mod tests {
 
     
     define_framework! {
-        b: TestModuleB,
-        a: TestModuleA
+        a: TestModuleA,
+        b: TestModuleB
     }
 
     #[test]
     fn test_module_size() {
-        println!("Size of TestModuleA: {}", std::mem::size_of::<TestModuleA>());
-        println!("Size of TestModuleB: {}", std::mem::size_of::<TestModuleB>());
-        println!("Size of TestModuleAView: {}", std::mem::size_of::<TestModuleAView>());
-        println!("Size of TestModuleBView: {}", std::mem::size_of::<TestModuleBView>());
+        //println!("Size of TestModuleA: {}", std::mem::size_of::<TestModuleA>());
+        //println!("Size of TestModuleB: {}", std::mem::size_of::<TestModuleB>());
+        //println!("Size of TestModuleAView: {}", std::mem::size_of::<TestModuleAView>());
+        //println!("Size of TestModuleBView: {}", std::mem::size_of::<TestModuleBView>());
     }
 
     #[tokio::test]
     async fn test_framework() {
-        println!("Starting test_framework");
+        // init tracing
+        let _=tracing_subscriber::fmt::try_init();
+
+        //println!("Starting test_framework");
         
         let mut fw = Framework::new();
-        println!("Created new framework");
+        //println!("Created new framework");
         
         // 创建测试参数
         let args = FrameworkArgs {
@@ -330,30 +323,30 @@ mod tests {
         
         // 使用trait方法初始化
         fw.init(args).await.unwrap();
-        println!("Initialized framework");
+        //println!("Initialized framework");
         
         // 通过 framework 获取 TestModuleA 的 view
         let view = fw.a_view();
         
         // 验证 TestModuleA 已初始化
-        assert!(*view.a().initialized.lock().unwrap());
-        assert!(!*view.a().shutdown.lock().unwrap());
+        assert!(*view.test_module_a().initialized.lock().unwrap());
+        assert!(!*view.test_module_a().shutdown.lock().unwrap());
         
         // 验证 TestModuleB 已初始化
-        assert!(*view.b().initialized.lock().unwrap());
-        assert!(!*view.b().shutdown.lock().unwrap());
+        assert!(*view.test_module_b().initialized.lock().unwrap());
+        assert!(!*view.test_module_b().shutdown.lock().unwrap());
         
-        println!("TestModuleB name: {}", view.b().name());
-        assert_eq!(view.b().name(), "TestModuleB");
+        //println!("TestModuleB name: {}", view.test_module_b().name());
+        assert_eq!(view.test_module_b().name(), "TestModuleB");
         
         // 使用trait方法关闭
-        <Framework as FrameworkTrait>::shutdown(&fw).await.unwrap();
-        println!("Shutdown framework");
+        fw.shutdown().await.unwrap();
+        //println!("Shutdown framework");
         
         // 验证模块已关闭
         let view = fw.a_view();
-        assert!(*view.a().shutdown.lock().unwrap());
-        assert!(*view.b().shutdown.lock().unwrap());
+        assert!(*view.test_module_a().shutdown.lock().unwrap());
+        assert!(*view.test_module_b().shutdown.lock().unwrap());
     }
 }
 
