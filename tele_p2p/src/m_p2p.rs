@@ -70,11 +70,7 @@ impl Responser {
     
     // 修改为通过view直接访问p2p
     pub fn p2p(&self) -> &P2pModule {
-        // 直接使用unsafe获取p2p模块，跳过安全检查
-        unsafe {
-            // 直接通过unsafe方式获取P2pModule引用
-            std::mem::transmute(&self.view)
-        }
+        self.view.p2p_module()
     }
 }
 
@@ -202,12 +198,8 @@ impl P2pModule {
         let msg_id = m.msg_id();
         info!("注册消息处理器，消息ID: {}", msg_id);
         
-        // 注意：这种方式存在生命周期问题，只是临时解决方案
-        // 在实际环境中，应当通过Framework生成新的View
-        let static_view: &'static P2pModuleView = unsafe {
-            std::mem::transmute::<&P2pModuleView, &'static P2pModuleView>(self.view.as_ref().unwrap())
-        };
         
+        let view=self.view.clone().expect("view of p2p module is none");
         self.dispatch_map.write().insert(
             msg_id,
             Box::new(move |nid, _p2p, task_id, data| {
@@ -221,7 +213,7 @@ impl P2pModule {
                 let resp = Responser {
                     task_id,
                     node_id: nid,
-                    view: unsafe { std::ptr::read(static_view) }, // 这是一个unsafe的临时解决方案
+                    view: view.clone(), 
                 };
                 
                 f(resp, v)

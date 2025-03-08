@@ -339,7 +339,7 @@ impl P2PKernel for P2PQuicNode {
             }
         };
         
-        debug!("发送消息到节点 {}，任务ID: {}，消息ID: {}", node, task_id, msg_id);
+        debug!("{} 发送消息到节点 {}，任务ID: {}，消息ID: {}", self.config.this.0, node, task_id, msg_id);
         
         let mut header = Vec::with_capacity(8);
         header.extend_from_slice(&msg_id.to_le_bytes());
