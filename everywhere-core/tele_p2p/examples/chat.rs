@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use paste::paste;
+use crate::cursor_extension::CursorExtension;
 
 // 共享状态：用于存储最新消息
 lazy_static! {
@@ -47,6 +48,7 @@ pub struct ChatModule {
     node_id: NodeID,
     node_name: String,
     target_id: NodeID,
+    cursor_extension: Arc<CursorExtension>,
 }
 
 // 聊天模块参数
@@ -105,6 +107,7 @@ impl LogicalModule for ChatModule {
             node_id,
             node_name: arg.node_name.clone(),
             target_id,
+            cursor_extension: Arc::new(CursorExtension::new()),
         };
         
         // 启动用户输入处理任务
@@ -172,24 +175,42 @@ impl LogicalModule for ChatModule {
 }
 
 // 发送聊天消息
-async fn send_chat(view: &ChatModuleView, content: String, node_id: NodeID, name: &str, target_id: NodeID) -> P2PResult<()> {
-    let p2p = view.p2p_module();
-    println!("发送消息 {} 到节点 {}", content, target_id);
-    // 创建消息
-    let message = ChatMessage {
+async fn send_chat(
+    view: &ChatModuleView,
+    content: String,
+    node_id: NodeID,
+    node_name: &str,
+    target_id: NodeID,
+) -> P2PResult<()> {
+    let cursor_extension = Arc::new(CursorExtension::new());
+    
+    // 获取验证问题
+    let question = cursor_extension.get_validation_question().await;
+    println!("验证问题: {}", question);
+    
+    // 验证消息
+    let validation = cursor_extension.validate_message(&content).await;
+    if !validation.is_correct {
+        println!("{}", validation.message);
+        return Ok(());
+    }
+    
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    let msg = ChatMessage {
         sender_id: node_id,
-        sender_name: name.to_string(),
+        sender_name: node_name.to_string(),
         content,
-        timestamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        timestamp,
     };
     
-    // 发送消息
-    let sender = MsgSender::<ChatMessage>::new();
-    info!("发送消息到节点 {}", target_id);
-    sender.send(p2p, target_id, message).await
+    let p2p = view.p2p_module();
+    p2p.send(target_id, ChatMessage::get_msg_id(), msg.encode())?;
+    
+    Ok(())
 }
 
 // 使用宏定义模块和框架
