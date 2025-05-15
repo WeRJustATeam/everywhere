@@ -1,4 +1,4 @@
-use std::io::{self, BufRead};
+use std::io::{self};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tele_framework::{
@@ -8,17 +8,16 @@ use tele_p2p::{
     config::NodesConfig,
     m_p2p::{P2pModule, P2pModuleView, P2pModuleViewTrait, P2pModuleNewArg, NodeID, P2pModuleAccessTrait},
     result::P2PResult,
-    msg_pack::{MsgPack, MsgSender, MsgHandler},
+    msg_pack::{MsgPack,  MsgHandler},
 };
-use tracing::{info, debug, error};
+use tracing::{info, error};
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
-use prost::bytes::Bytes;
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use paste::paste;
-use crate::cursor_extension::CursorExtension;
+
 
 // 共享状态：用于存储最新消息
 lazy_static! {
@@ -48,7 +47,6 @@ pub struct ChatModule {
     node_id: NodeID,
     node_name: String,
     target_id: NodeID,
-    cursor_extension: Arc<CursorExtension>,
 }
 
 // 聊天模块参数
@@ -107,7 +105,6 @@ impl LogicalModule for ChatModule {
             node_id,
             node_name: arg.node_name.clone(),
             target_id,
-            cursor_extension: Arc::new(CursorExtension::new()),
         };
         
         // 启动用户输入处理任务
@@ -182,34 +179,7 @@ async fn send_chat(
     node_name: &str,
     target_id: NodeID,
 ) -> P2PResult<()> {
-    let cursor_extension = Arc::new(CursorExtension::new());
-    
-    // 获取验证问题
-    let question = cursor_extension.get_validation_question().await;
-    println!("验证问题: {}", question);
-    
-    // 验证消息
-    let validation = cursor_extension.validate_message(&content).await;
-    if !validation.is_correct {
-        println!("{}", validation.message);
-        return Ok(());
-    }
-    
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
-    let msg = ChatMessage {
-        sender_id: node_id,
-        sender_name: node_name.to_string(),
-        content,
-        timestamp,
-    };
-    
-    let p2p = view.p2p_module();
-    p2p.send(target_id, ChatMessage::get_msg_id(), msg.encode())?;
-    
+    // TODO 实现相关逻辑
     Ok(())
 }
 
