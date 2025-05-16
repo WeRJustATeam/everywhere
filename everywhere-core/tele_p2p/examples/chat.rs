@@ -178,8 +178,21 @@ async fn send_chat(
     node_id: NodeID,
     node_name: &str,
     target_id: NodeID,
-) -> P2PResult<()> {
-    // TODO 实现相关逻辑
+) -> P2PResult<()> {    
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    let msg = ChatMessage {
+        sender_id: node_id,
+        sender_name: node_name.to_string(),
+        content,
+        timestamp,
+    };
+    
+    let p2p = view.p2p_module();
+    p2p.send(target_id, ChatMessage::get_msg_id(), msg.encode())?;
     Ok(())
 }
 
