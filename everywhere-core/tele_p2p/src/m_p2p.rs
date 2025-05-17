@@ -7,18 +7,18 @@ use std::{
     },
 };
 
-use tele_framework::{LogicalModule, WSResult};
-use parking_lot::RwLock;
-use prost::bytes::Bytes;
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use paste::paste;
+use prost::bytes::Bytes;
+use tele_framework::{LogicalModule, WSResult};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     config::NodesConfig,
-    result::{P2PError, P2PResult},
-    msg_pack::{MsgPack, RPCReq},
     m_p2p_quic::P2PQuicNode,
+    msg_pack::{MsgPack, RPCReq},
+    result::{P2PError, P2PResult},
 };
 
 pub type TaskId = u32;
@@ -27,7 +27,7 @@ pub type NodeID = u32;
 
 #[async_trait]
 pub trait P2PKernel: Send + Sync {
-    async fn send_for_response(&self, nodeid: NodeID, req_data: Vec<u8>) -> P2PResult<Vec<u8>>;
+    // async fn send_for_response(&self, nodeid: NodeID, req_data: Vec<u8>) -> P2PResult<Vec<u8>>;
     async fn send(
         &self,
         node: NodeID,
@@ -35,7 +35,7 @@ pub trait P2PKernel: Send + Sync {
         msg_id: MsgId,
         req_data: Vec<u8>,
     ) -> P2PResult<()>;
-    
+
     // 添加start方法到trait定义
     async fn start(&self) -> P2PResult<()>;
 }
@@ -57,7 +57,9 @@ impl Responser {
         RESP: MsgPack,
     {
         // 直接获取p2p模块并调用方法
-        self.p2p().send_resp_impl(self.node_id, self.task_id, resp).await
+        self.p2p()
+            .send_resp_impl(self.node_id, self.task_id, resp)
+            .await
     }
 
     pub fn node_id(&self) -> NodeID {
@@ -67,7 +69,7 @@ impl Responser {
     pub fn task_id(&self) -> TaskId {
         self.task_id
     }
-    
+
     // 修改为通过view直接访问p2p
     pub fn p2p(&self) -> &P2pModule {
         self.view.p2p_module()
@@ -95,10 +97,7 @@ impl<R: RPCReq> RPCResponsor<R> {
 
 pub struct P2pModule {
     dispatch_map: RwLock<
-        HashMap<
-            MsgId,
-            Box<dyn Fn(NodeID, &Self, TaskId, Vec<u8>) -> P2PResult<()> + Send + Sync>,
-        >,
+        HashMap<MsgId, Box<dyn Fn(NodeID, &Self, TaskId, Vec<u8>) -> P2PResult<()> + Send + Sync>>,
     >,
     waiting_tasks: crossbeam_skiplist::SkipMap<
         (TaskId, NodeID),
@@ -123,15 +122,11 @@ impl LogicalModule for P2pModule {
 
     async fn init(view: Self::View, arg: Self::NewArg) -> WSResult<Self> {
         info!("初始化 P2pModule");
-        
+
         // 创建P2PQuicNode替代DummyKernel
         info!("创建P2PQuicNode作为P2P内核");
-        let mut p2p_quic_node = P2PQuicNode::new(arg.nodes_config.clone());
-        
-        // 设置view
-        info!("设置P2pModuleView到P2PQuicNode");
-        p2p_quic_node.set_view(view.clone());
-        
+        let mut p2p_quic_node = P2PQuicNode::new(arg.nodes_config.clone(), view.clone());
+
         // 初始化模块
         let module = Self {
             view: Some(view),
@@ -143,18 +138,18 @@ impl LogicalModule for P2pModule {
             initialized: Mutex::new(true),
             shutdown: Mutex::new(false),
         };
-        
+
         // 启动P2P内核
         info!("启动P2P内核");
         if let Err(e) = module.p2p_kernel.start().await {
             error!("启动P2P内核失败: {}", e);
             // 转换错误类型
             return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other, 
-                format!("启动P2P内核失败: {}", e)
+                std::io::ErrorKind::Other,
+                format!("启动P2P内核失败: {}", e),
             )));
         }
-        
+
         Ok(module)
     }
 
@@ -180,14 +175,17 @@ impl P2pModule {
 
     // 找到对应地址的节点ID
     pub fn find_peer_id(&self, addr: &std::net::SocketAddr) -> Option<NodeID> {
-        self.nodes_config.peers.iter().find_map(|(id, node_config)| {
-            if node_config.addr == *addr {
-                debug!("找到地址 {:?} 对应的节点ID: {}", addr, id);
-                Some(*id)
-            } else {
-                None
-            }
-        })
+        self.nodes_config
+            .peers
+            .iter()
+            .find_map(|(id, node_config)| {
+                if node_config.addr == *addr {
+                    debug!("找到地址 {:?} 对应的节点ID: {}", addr, id);
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn regist_dispatch<M, F>(&self, m: M, f: F)
@@ -197,25 +195,26 @@ impl P2pModule {
     {
         let msg_id = m.msg_id();
         info!("注册消息处理器，消息ID: {}", msg_id);
-        
-        
-        let view=self.view.clone().expect("view of p2p module is none");
+
+        let view = self.view.clone().expect("view of p2p module is none");
         self.dispatch_map.write().insert(
             msg_id,
             Box::new(move |nid, _p2p, task_id, data| {
-                debug!("处理来自节点 {} 的消息，任务ID: {}, 消息ID: {}", nid, task_id, msg_id);
-                let v = M::decode_from(&data)
-                    .map_err(|err| {
-                        error!("解码消息失败: {}", err);
-                        P2PError::InvalidMessage(err.to_string())
-                    })?;
-                
+                debug!(
+                    "处理来自节点 {} 的消息，任务ID: {}, 消息ID: {}",
+                    nid, task_id, msg_id
+                );
+                let v = M::decode_from(&data).map_err(|err| {
+                    error!("解码消息失败: {}", err);
+                    P2PError::InvalidMessage(err.to_string())
+                })?;
+
                 let resp = Responser {
                     task_id,
                     node_id: nid,
-                    view: view.clone(), 
+                    view: view.clone(),
                 };
-                
+
                 f(resp, v)
             }),
         );
@@ -223,8 +222,11 @@ impl P2pModule {
 
     // 分发收到的消息
     pub fn dispatch(&self, node_id: NodeID, msg_id: MsgId, task_id: TaskId, bytes: Vec<u8>) {
-        debug!("分发消息: 节点={}, 消息ID={}, 任务ID={}", node_id, msg_id, task_id);
-        
+        debug!(
+            "分发消息: 节点={}, 消息ID={}, 任务ID={}",
+            node_id, msg_id, task_id
+        );
+
         let dispatch_map = self.dispatch_map.read();
         match dispatch_map.get(&msg_id) {
             Some(handler) => {
@@ -243,28 +245,29 @@ impl P2pModule {
         REQ: RPCReq,
     {
         let resp_type = REQ::Resp::default();
-        info!("注册RPC响应处理器: {:?}", std::any::type_name::<REQ::Resp>());
-        
+        info!(
+            "注册RPC响应处理器: {:?}",
+            std::any::type_name::<REQ::Resp>()
+        );
+
         self.regist_dispatch(resp_type, |resp, v| {
             // 直接获取p2p模块
-            debug!("处理RPC响应: 节点={}, 任务ID={}", resp.node_id, resp.task_id);
+            debug!(
+                "处理RPC响应: 节点={}, 任务ID={}",
+                resp.node_id, resp.task_id
+            );
             let p2p = resp.p2p();
-            let cb = p2p
-                .waiting_tasks
-                .remove(&(resp.task_id, resp.node_id));
-            
+            let cb = p2p.waiting_tasks.remove(&(resp.task_id, resp.node_id));
+
             if let Some(cell) = cb {
-                let _r = cell.value()
-                    .lock()
-                    .take()
-                    .map(|tx| {
-                        debug!("发送RPC响应");
-                        tx.send(v.encode())
-                    });
+                let _r = cell.value().lock().take().map(|tx| {
+                    debug!("发送RPC响应");
+                    tx.send(v.encode())
+                });
             } else {
                 warn!("找不到等待的RPC任务: ({}, {})", resp.task_id, resp.node_id);
             }
-            
+
             Ok(())
         });
     }
@@ -276,9 +279,12 @@ impl P2pModule {
     {
         let req_type = REQ::default();
         info!("注册RPC请求处理器: {:?}", std::any::type_name::<REQ>());
-        
+
         self.regist_dispatch(req_type, move |resp, req| {
-            debug!("处理RPC请求: 节点={}, 任务ID={}", resp.node_id, resp.task_id);
+            debug!(
+                "处理RPC请求: 节点={}, 任务ID={}",
+                resp.node_id, resp.task_id
+            );
             let rpc_resp = RPCResponsor {
                 _phantom: PhantomData,
                 responsor: resp,
@@ -295,17 +301,23 @@ impl P2pModule {
     ) -> P2PResult<REQ::Resp> {
         let task_id = self.next_task_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        
-        debug!("发起RPC调用: 节点={}, 任务ID={}, 类型={:?}", 
-               node, task_id, std::any::type_name::<REQ>());
-        
-        self.waiting_tasks.insert(
-            (task_id, node),
-            parking_lot::Mutex::new(Some(tx)),
+
+        debug!(
+            "发起RPC调用: 节点={}, 任务ID={}, 类型={:?}",
+            node,
+            task_id,
+            std::any::type_name::<REQ>()
         );
 
+        self.waiting_tasks
+            .insert((task_id, node), parking_lot::Mutex::new(Some(tx)));
+
         let req_data = req.encode();
-        if let Err(e) = self.p2p_kernel.send(node, task_id, req.msg_id(), req_data).await {
+        if let Err(e) = self
+            .p2p_kernel
+            .send(node, task_id, req.msg_id(), req_data)
+            .await
+        {
             error!("发送RPC请求失败: {}", e);
             return Err(e);
         }
@@ -313,37 +325,46 @@ impl P2pModule {
         // 使用超时机制
         let timeout_duration = timeout.unwrap_or(std::time::Duration::from_secs(30));
         let result = tokio::time::timeout(timeout_duration, rx).await;
-        
+
         match result {
             Ok(Ok(resp_data)) => {
                 debug!("RPC调用成功: 节点={}, 任务ID={}", node, task_id);
-                REQ::Resp::decode_from(&resp_data)
-                    .map_err(|e| {
-                        error!("解码RPC响应失败: {}", e);
-                        P2PError::InvalidMessage(e.to_string())
-                    })
-            },
+                REQ::Resp::decode_from(&resp_data).map_err(|e| {
+                    error!("解码RPC响应失败: {}", e);
+                    P2PError::InvalidMessage(e.to_string())
+                })
+            }
             Ok(Err(_)) => {
                 error!("RPC响应通道错误: 节点={}, 任务ID={}", node, task_id);
                 Err(P2PError::Other("RPC响应通道错误".to_string()))
-            },
+            }
             Err(_) => {
                 error!("RPC调用超时: 节点={}, 任务ID={}", node, task_id);
                 // 清理等待任务
                 self.waiting_tasks.remove(&(task_id, node));
-                Err(P2PError::Timeout(format!("RPC调用超时: 节点={}, 任务ID={}", node, task_id)))
+                Err(P2PError::Timeout(format!(
+                    "RPC调用超时: 节点={}, 任务ID={}",
+                    node, task_id
+                )))
             }
         }
     }
 
     // 发送响应实现
-    pub async fn send_resp_impl<RESP>(&self, node: NodeID, task_id: TaskId, resp: RESP) -> P2PResult<()>
+    pub async fn send_resp_impl<RESP>(
+        &self,
+        node: NodeID,
+        task_id: TaskId,
+        resp: RESP,
+    ) -> P2PResult<()>
     where
         RESP: MsgPack,
     {
         debug!("发送响应: 节点={}, 任务ID={}", node, task_id);
         let resp_data = resp.encode();
-        self.p2p_kernel.send(node, task_id, resp.msg_id(), resp_data).await
+        self.p2p_kernel
+            .send(node, task_id, resp.msg_id(), resp_data)
+            .await
     }
 }
 
