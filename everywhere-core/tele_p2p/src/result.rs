@@ -1,41 +1,54 @@
 use std::error::Error;
 use std::fmt;
+use thiserror::Error;
+
+use qp2p::EndpointError;
+
+use crate::NodeID;
 
 pub type P2PResult<T> = Result<T, P2PError>;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum P2PError {
-    IoError(std::io::Error),
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("Serialization error: {0}")]
     SerdeError(String),
+
+    #[error("No connection ready: {nodeid}")]
+    NoConnectionReady { nodeid: NodeID },
+
+    #[error("Connection error: {0}")]
     ConnectionError(String),
+
+    #[error("Invalid message: {0}")]
     InvalidMessage(String),
+
+    #[error("Timeout: {0}")]
     Timeout(String),
+
+    #[error("Other error: {0}")]
     Other(String),
+
+    #[error("Failed to start server: {0}")]
+    StartServerError(EndpointError),
+
+    #[error("Failed to deserialize message ID or task ID: {err}, context: {context}")]
+    DeserialMsgIdTaskIdFailed {
+        err: Box<bincode::ErrorKind>,
+        context: String,
+    },
 }
 
-impl fmt::Display for P2PError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            P2PError::IoError(e) => write!(f, "IO error: {}", e),
-            P2PError::SerdeError(e) => write!(f, "Serialization error: {}", e),
-            P2PError::ConnectionError(e) => write!(f, "Connection error: {}", e),
-            P2PError::InvalidMessage(e) => write!(f, "Invalid message: {}", e),
-            P2PError::Timeout(e) => write!(f, "Timeout error: {}", e),
-            P2PError::Other(e) => write!(f, "Other error: {}", e),
-        }
-    }
-}
+// impl From<std::io::Error> for P2PError {
+//     fn from(err: std::io::Error) -> Self {
+//         P2PError::IoError(err)
+//     }
+// }
 
-impl Error for P2PError {}
-
-impl From<std::io::Error> for P2PError {
-    fn from(err: std::io::Error) -> Self {
-        P2PError::IoError(err)
-    }
-}
-
-impl From<Box<dyn Error + Send + Sync>> for P2PError {
-    fn from(err: Box<dyn Error + Send + Sync>) -> Self {
-        P2PError::Other(err.to_string())
-    }
-} 
+// impl From<Box<dyn Error + Send + Sync>> for P2PError {
+//     fn from(err: Box<dyn Error + Send + Sync>) -> Self {
+//         P2PError::Other(err.to_string())
+//     }
+// }

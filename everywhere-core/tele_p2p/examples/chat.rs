@@ -1,24 +1,22 @@
-use std::io::{self, BufRead};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tele_framework::{
-    LogicalModule, WSResult, define_module, define_framework
-};
-use tele_p2p::{
-    config::NodesConfig,
-    m_p2p::{P2pModule, P2pModuleView, P2pModuleViewTrait, P2pModuleNewArg, NodeID, P2pModuleAccessTrait},
-    result::P2PResult,
-    msg_pack::{MsgPack, MsgSender, MsgHandler},
-};
-use tracing::{info, debug, error};
-use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
-use prost::bytes::Bytes;
-use serde::{Serialize, Deserialize};
-use std::time::Duration;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use paste::paste;
-use crate::cursor_extension::CursorExtension;
+use prost::bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use std::io::{self, BufRead};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tele_framework::{define_framework, define_module, LogicalModule, WSResult};
+use tele_p2p::{
+    config::NodesConfig,
+    m_p2p::{
+        NodeID, P2pModule, P2pModuleAccessTrait, P2pModuleNewArg, P2pModuleView, P2pModuleViewTrait,
+    },
+    msg_pack::{MsgHandler, MsgPack, MsgSender},
+    result::P2PResult,
+};
+use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
 // 共享状态：用于存储最新消息
 lazy_static! {
@@ -48,7 +46,6 @@ pub struct ChatModule {
     node_id: NodeID,
     node_name: String,
     target_id: NodeID,
-    cursor_extension: Arc<CursorExtension>,
 }
 
 // 聊天模块参数
@@ -73,49 +70,45 @@ impl LogicalModule for ChatModule {
     }
 
     async fn init(view: Self::View, arg: Self::NewArg) -> WSResult<Self> {
-        info!("初始化 ChatModule");
-        
+        tracing::info!("初始化 ChatModule");
+
         // 获取本节点信息
         let p2p = view.p2p_module();
         let node_id = p2p.nodes_config.this_node();
         let target_id = if node_id == 1 { 2 } else { 1 };
-        info!("聊天节点 {} ({}) 初始化中", arg.node_name, node_id);
-        
+        tracing::info!("聊天节点 {} ({}) 初始化中", arg.node_name, node_id);
+
         // 注册消息处理器
         let msg_handler = MsgHandler::<ChatMessage>::new();
         let this_node_copy = node_id; // 复制以便在闭包中使用
-        
+
         msg_handler.regist(p2p, move |_resp, msg: ChatMessage| {
             // 只显示来自其他节点的消息
             if msg.sender_id != this_node_copy {
-                println!("\n[{}] {}: {}", 
-                         msg.sender_name, 
-                         msg.timestamp, 
-                         msg.content);
+                println!("\n[{}] {}: {}", msg.sender_name, msg.timestamp, msg.content);
                 println!("请输入回复: ");
-                
+
                 // 保存消息
                 let mut latest = LATEST_MESSAGE.lock().unwrap();
                 *latest = Some(format!("[{}] {}", msg.sender_name, msg.content));
             }
             Ok(())
         });
-        
+
         // 创建聊天模块
         let module = Self {
             view: view.clone(),
             node_id,
             node_name: arg.node_name.clone(),
             target_id,
-            cursor_extension: Arc::new(CursorExtension::new()),
         };
-        
+
         // 启动用户输入处理任务
         let view_clone = view.clone();
         let node_name_clone = arg.node_name.clone();
         let node_id_copy = node_id;
         let target_id_copy = target_id;
-        
+
         // 打印欢迎信息
         let target_name = if node_id == 1 { "Bob" } else { "Alice" };
         println!("\n聊天程序已启动!");
@@ -123,53 +116,55 @@ impl LogicalModule for ChatModule {
         println!("你正在与 {} (节点{}) 聊天", target_name, target_id);
         println!("输入消息并按Enter发送，或输入'exit'退出");
         println!("请输入消息: ");
-        
+
         // 使用spawn_blocking处理阻塞的stdin读取
         tokio::task::spawn_blocking(move || {
             let stdin = io::stdin();
             let mut buffer = String::new();
-            
+
             loop {
                 buffer.clear();
                 if stdin.read_line(&mut buffer).is_err() {
-                    error!("读取输入失败");
+                    tracing::error!("读取输入失败");
                     break;
                 }
-                
+
                 let input = buffer.trim().to_string();
                 if input.eq_ignore_ascii_case("exit") {
                     break;
                 }
-                
+
                 if !input.is_empty() {
                     println!("输入不为空, 发送 {}", input);
                     // 发送消息
                     let view_clone = view_clone.clone();
                     let content = input.clone();
                     let name = node_name_clone.clone();
-                    
+
                     // 使用tokio::spawn启动异步任务发送消息
                     tokio::spawn(async move {
                         println!("send_chat");
-                        match send_chat(&view_clone, content, node_id_copy, &name, target_id_copy).await {
-                            Ok(_) => {},
-                            Err(e) => error!("发送消息失败: {}", e),
+                        match send_chat(&view_clone, content, node_id_copy, &name, target_id_copy)
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(e) => tracing::error!("发送消息失败: {}", e),
                         }
                     });
-                }else{
+                } else {
                     println!("输入为空");
                 }
-                
+
                 println!("请输入消息: ");
             }
         });
-        
-        info!("ChatModule初始化完成");
+
+        tracing::info!("ChatModule初始化完成");
         Ok(module)
     }
 
     async fn shutdown(&self) -> WSResult<()> {
-        info!("关闭 ChatModule");
+        tracing::info!("关闭 ChatModule");
         Ok(())
     }
 }
@@ -179,38 +174,29 @@ async fn send_chat(
     view: &ChatModuleView,
     content: String,
     node_id: NodeID,
-    node_name: &str,
+    name: &str,
     target_id: NodeID,
 ) -> P2PResult<()> {
-    let cursor_extension = Arc::new(CursorExtension::new());
-    
-    // 获取验证问题
-    let question = cursor_extension.get_validation_question().await;
-    println!("验证问题: {}", question);
-    
-    // 验证消息
-    let validation = cursor_extension.validate_message(&content).await;
-    if !validation.is_correct {
-        println!("{}", validation.message);
-        return Ok(());
-    }
-    
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
-    let msg = ChatMessage {
-        sender_id: node_id,
-        sender_name: node_name.to_string(),
-        content,
-        timestamp,
-    };
-    
     let p2p = view.p2p_module();
-    p2p.send(target_id, ChatMessage::get_msg_id(), msg.encode())?;
-    
-    Ok(())
+    println!("发送消息 {} 到节点 {}", content, target_id);
+    // 创建消息
+    let message = ChatMessage {
+        sender_id: node_id,
+        sender_name: name.to_string(),
+        content,
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+
+    // 发送消息
+    let sender = MsgSender::<ChatMessage>::new();
+    tracing::info!("发送消息到节点 {}", target_id);
+    sender.send(p2p, target_id, message).await.map_err(|e| {
+        tracing::error!("发送消息失败: {}", e);
+        e
+    })
 }
 
 // 使用宏定义模块和框架
@@ -225,15 +211,16 @@ define_framework! {
 async fn main() -> WSResult<()> {
     // 初始化日志
     let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("tele_p2p=info".parse().unwrap()))
+        .with_env_filter(
+            EnvFilter::from_default_env().add_directive("tele_p2p=debug".parse().unwrap()),
+        )
         .with_span_events(FmtSpan::CLOSE)
         .finish();
-    
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("设置全局日志订阅器失败");
-    
-    info!("启动聊天程序");
-    
+
+    tracing::subscriber::set_global_default(subscriber).expect("设置全局日志订阅器失败");
+
+    tracing::info!("启动聊天程序");
+
     // 读取命令行参数
     let args: Vec<String> = std::env::args().collect();
     let node_id = if args.len() > 1 {
@@ -250,11 +237,11 @@ async fn main() -> WSResult<()> {
         println!("用法: cargo run --example chat [1|2]");
         return Ok(());
     };
-    
+
     // 设置节点名称
     let node_name = if node_id == 1 { "Alice" } else { "Bob" };
-    info!("启动节点 {} ({})", node_name, node_id);
-    
+    tracing::info!("启动节点 {} ({})", node_name, node_id);
+
     // 创建节点配置
     let config = NodesConfig::new(
         node_id,
@@ -263,30 +250,26 @@ async fn main() -> WSResult<()> {
             (2, "127.0.0.1:10002".parse().unwrap()),
         ],
     );
-    
+
     // 创建模块参数
     let p2p_arg = P2pModuleNewArg::new(config);
     let chat_arg = ChatModuleNewArg::new(node_name.to_string());
-    
+
     // 创建框架参数
-    let framework_args = FrameworkArgs {
-        p2p_arg,
-        chat_arg,
-    };
-    
+    let framework_args = FrameworkArgs { p2p_arg, chat_arg };
+
     // 创建并初始化框架
     let framework = Framework::new();
-    info!("初始化框架");
+    tracing::info!("初始化框架");
     framework.init(framework_args).await?;
-    
+
     // 等待连接建立
-    info!("等待5秒钟让节点互联...");
+    tracing::info!("等待5秒钟让节点互联...");
     tokio::time::sleep(Duration::from_secs(5)).await;
-    
+
     // 只等待Ctrl+C信号
     tokio::signal::ctrl_c().await.expect("无法监听Ctrl+C信号");
-    info!("接收到Ctrl+C信号，程序退出");
-    
-    println!("聊天程序已关闭");
+    tracing::info!("接收到Ctrl+C信号，聊天程序退出");
+
     Ok(())
-} 
+}
